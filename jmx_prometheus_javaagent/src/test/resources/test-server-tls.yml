@@ -1,0 +1,3 @@
+serverTLSEnabled: true
+serverKeyStorePath: /tmp/ks.p12
+serverKeyStorePassword: secret

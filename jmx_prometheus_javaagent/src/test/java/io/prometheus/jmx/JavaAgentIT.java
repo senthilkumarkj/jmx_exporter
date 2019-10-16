@@ -3,17 +3,28 @@ package io.prometheus.jmx;
 import static org.hamcrest.MatcherAssert.assertThat;
 
 import java.io.BufferedReader;
+import java.io.BufferedWriter;
 import java.io.File;
+import java.io.FileWriter;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.net.URL;
 import java.net.URLClassLoader;
+import java.security.GeneralSecurityException;
+import java.security.cert.CertificateException;
+import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
+import javax.net.ssl.HostnameVerifier;
+import javax.net.ssl.HttpsURLConnection;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLSession;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
 import org.junit.Test;
 
 public class JavaAgentIT {
@@ -49,13 +60,19 @@ public class JavaAgentIT {
     }
 
     @Test
-    public void agentLoads() throws IOException, InterruptedException {
+    public void agentLoads() throws IOException, InterruptedException, GeneralSecurityException {
         // If not starting the testcase via Maven, set the buildDirectory and finalName system properties manually.
         final String buildDirectory = (String) System.getProperties().get("buildDirectory");
         final String finalName = (String) System.getProperties().get("finalName");
         final int port = Integer.parseInt((String) System.getProperties().get("it.port"));
         final String config = resolveRelativePathToResource("test.yml");
-        final String javaagent = "-javaagent:" + buildDirectory + "/" + finalName + ".jar=" + port + ":" + config;
+        final File file = File.createTempFile("server-config", ".yml");
+        BufferedWriter bw = new BufferedWriter(new FileWriter(file));
+        bw.write("serverTLSEnabled: true\n");
+        bw.write("serverKeyStorePath: "+ resolveRelativePathToResource("ks.p12") +"\n");
+        bw.write("serverKeyStorePassword: ykOUaInleG/fqTPi\n");
+        bw.close();
+        final String javaagent = "-javaagent:" + buildDirectory + "/" + finalName + ".jar=" + port + ":" + config + "," + file.getAbsolutePath();
 
         final String javaHome = System.getenv("JAVA_HOME");
         final String java;
@@ -71,8 +88,8 @@ public class JavaAgentIT {
         try {
             // Wait for application to start
             app.getInputStream().read();
-
-            InputStream stream = new URL("http://localhost:" + port + "/metrics").openStream();
+            setupTrustStores();
+            InputStream stream = new URL("https://localhost:" + port + "/metrics").openStream();
             BufferedReader contents = new BufferedReader(new InputStreamReader(stream));
             boolean found = false;
             while (!found) {
@@ -86,7 +103,6 @@ public class JavaAgentIT {
             }
 
             assertThat("Expected metric not found", found);
-
             // Tell application to stop
             app.getOutputStream().write('\n');
             try {
@@ -111,5 +127,38 @@ public class JavaAgentIT {
         final String configwk = new File(getClass().getClassLoader().getResource(resource).getFile()).getAbsolutePath();
         final File workingDir = new File(new File(".").getAbsolutePath());
         return "." + configwk.replace(workingDir.getParentFile().getAbsolutePath(), "");
+    }
+
+    private void setupTrustStores() throws GeneralSecurityException {
+        TrustManager[] trustAllCerts = new TrustManager[]{
+            new X509TrustManager() {
+                @Override
+                public void checkClientTrusted(X509Certificate[] x509Certificates, String s)
+                    throws CertificateException {
+                }
+
+                @Override
+                public void checkServerTrusted(X509Certificate[] x509Certificates, String s)
+                    throws CertificateException {
+                }
+
+                @Override
+                public X509Certificate[] getAcceptedIssuers() {
+                    return new X509Certificate[0];
+                }
+            }
+        };
+
+        // Install the all-trusting trust manager
+        SSLContext sc = SSLContext.getInstance("TLS");
+        sc.init(null, trustAllCerts, new java.security.SecureRandom());
+
+        HttpsURLConnection.setDefaultSSLSocketFactory(sc.getSocketFactory());
+        HttpsURLConnection.setDefaultHostnameVerifier(new HostnameVerifier() {
+            @Override
+            public boolean verify(String s, SSLSession sslSession) {
+                return true;
+            }
+        });
     }
 }
